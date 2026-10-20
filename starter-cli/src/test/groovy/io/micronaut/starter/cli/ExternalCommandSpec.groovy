@@ -210,6 +210,22 @@ class ExternalCommandSpec extends Specification {
     }
 
     @Requires({ OperatingSystem.current.windows })
+    void "mn runs a Windows batch external command from a PATH directory with spaces"() {
+        given:
+        Path spacedBin = bin.resolve("path with spaces")
+        Files.createDirectories(spacedBin)
+        Path marker = spacedBin.resolve("marker.txt")
+        script(spacedBin, "mn-hello.cmd", "@echo off\r\n>\"${marker}\" echo arg1=%~1 arg2=[%~2] arg3=[%~3]\r\nexit /b 7\r\n")
+
+        when:
+        int exitCode = MicronautStarter.execute(["hello", "three four", "", "tail\\"] as String[], environment(spacedBin))
+
+        then:
+        exitCode == 7
+        Files.readString(marker).trim() == "arg1=three four arg2=[] arg3=[tail\\]"
+    }
+
+    @Requires({ OperatingSystem.current.windows })
     void "mn refuses shell metacharacters for a Windows batch external command"() {
         given:
         Path marker = bin.resolve("marker.txt")
@@ -246,7 +262,11 @@ class ExternalCommandSpec extends Specification {
     }
 
     private Map<String, String> environment() {
-        [PATH: bin.toString(), PATHEXT: ".EXE;.CMD;.BAT"]
+        environment(bin)
+    }
+
+    private Map<String, String> environment(Path path) {
+        [PATH: path.toString(), PATHEXT: ".EXE;.CMD;.BAT"]
     }
 
     private Path executable(String name) {
@@ -255,7 +275,11 @@ class ExternalCommandSpec extends Specification {
     }
 
     private Path script(String fileName, String content) {
-        Path file = bin.resolve(fileName)
+        script(bin, fileName, content)
+    }
+
+    private Path script(Path directory, String fileName, String content) {
+        Path file = directory.resolve(fileName)
         Files.writeString(file, content)
         if (!OperatingSystem.current.windows) {
             Files.setPosixFilePermissions(file, PosixFilePermissions.fromString("rwxr-xr-x"))

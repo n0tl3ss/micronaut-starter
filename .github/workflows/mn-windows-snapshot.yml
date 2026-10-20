@@ -54,12 +54,30 @@ jobs:
           if ($LASTEXITCODE -ne 7) { throw "External command with -- returned $LASTEXITCODE instead of 7" }
           if ($output.Trim() -ne "arg=three four") { throw "Unexpected external command output after --: $output" }
 
+          $edgeScript = Join-Path $external "mn-edge.cmd"
+          $edgeMarker = Join-Path $external "edge.marker"
+          $edgeScriptContent = "@echo off`r`n>""$edgeMarker"" echo arg1=%~1 arg2=[%~2] arg3=[%~3]`r`nexit /b 7`r`n"
+          Set-Content -Path $edgeScript -Value $edgeScriptContent -Encoding ascii -NoNewline
+          $output = & $mn "edge" "three four" "" "tail\" 2>&1 | Out-String
+          if ($LASTEXITCODE -ne 7) { throw "External command edge case returned $LASTEXITCODE instead of 7" }
+          $edgeArgs = (Get-Content -Raw $edgeMarker).Trim()
+          if ($edgeArgs -ne "arg1=three four arg2=[] arg3=[tail\]") { throw "Unexpected edge-case arguments: $edgeArgs" }
+
           Remove-Item $marker -Force -ErrorAction SilentlyContinue
-          foreach ($dangerous in @("a&echo INJECTED", "%PATH%")) {
-            $output = & $mn "hello" $dangerous 2>&1 | Out-String
-            if ($LASTEXITCODE -ne 127) { throw "Dangerous external argument returned $LASTEXITCODE instead of 127" }
-            if (Test-Path $marker) { throw "Batch command executed for dangerous argument: $dangerous" }
+          $previousErrorActionPreference = $ErrorActionPreference
+          $ErrorActionPreference = "Continue"
+          try {
+            foreach ($dangerous in @("a&echo INJECTED", "%PATH%")) {
+              $output = & $mn "hello" $dangerous 2>&1 | Out-String
+              if ($LASTEXITCODE -ne 127) { throw "Dangerous external argument returned $LASTEXITCODE instead of 127" }
+              if ($output -notmatch "command-shell metacharacters") { throw "Missing dangerous-argument diagnostic: $output" }
+              if (Test-Path $marker) { throw "Batch command executed for dangerous argument: $dangerous" }
+            }
+          } finally {
+            $ErrorActionPreference = $previousErrorActionPreference
           }
+          # All deliberately nonzero child statuses were asserted above.
+          exit 0
       - name: "✅ Verify Build (CMD)"
         shell: cmd
         run: starter-cli\\build\\native\\nativeCompile\\mn --version

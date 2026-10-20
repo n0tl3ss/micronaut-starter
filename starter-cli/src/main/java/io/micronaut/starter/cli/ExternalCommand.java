@@ -268,20 +268,31 @@ final class ExternalCommand {
 
     private List<String> processCommand() {
         if (isWindowsBatchFile(executable)) {
-            // CreateProcess cannot execute a .cmd/.bat file directly. The command
-            // is started by a fresh command processor, so its exit code is retained.
-            List<String> commandLine = new ArrayList<>(arguments.size() + 4);
+            // CreateProcess cannot execute a .cmd/.bat file directly. Pass one
+            // quoted command string so cmd.exe preserves a path containing spaces.
+            List<String> commandLine = new ArrayList<>(4);
             commandLine.add(commandProcessor());
             commandLine.add("/d");
+            commandLine.add("/s");
             commandLine.add("/c");
-            commandLine.add(executable.toString());
-            commandLine.addAll(arguments);
+            StringBuilder command = new StringBuilder("\"");
+            appendBatchArgument(command, executable.toString());
+            for (String argument : arguments) {
+                command.append(' ');
+                appendBatchArgument(command, argument);
+            }
+            command.append('"');
+            commandLine.add(command.toString());
             return commandLine;
         }
         List<String> commandLine = new ArrayList<>(arguments.size() + 1);
         commandLine.add(executable.toString());
         commandLine.addAll(arguments);
         return commandLine;
+    }
+
+    private static void appendBatchArgument(StringBuilder command, String argument) {
+        command.append('"').append(argument).append('"');
     }
 
     private static String commandProcessor() {
