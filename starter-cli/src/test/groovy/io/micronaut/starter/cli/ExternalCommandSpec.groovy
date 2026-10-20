@@ -169,6 +169,7 @@ class ExternalCommandSpec extends Specification {
         long childPid = -1
         new PollingConditions(timeout: 10, initialDelay: 0.1, delay: 0.1).eventually {
             assert Files.exists(pidFile)
+            assert !Files.readString(pidFile).isBlank()
         }
         childPid = Long.parseLong(Files.readString(pidFile))
 
