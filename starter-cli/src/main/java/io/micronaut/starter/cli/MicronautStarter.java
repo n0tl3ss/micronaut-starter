@@ -43,6 +43,10 @@ import picocli.CommandLine;
 import picocli.CommandLine.Command;
 import picocli.CommandLine.ParameterException;
 
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.Callable;
 import java.util.function.BiFunction;
 
@@ -117,17 +121,46 @@ public class MicronautStarter extends BaseCommand implements Callable<Integer> {
     }
 
     static int execute(String[] args) {
+        return execute(args, System.getenv());
+    }
+
+    /**
+     * Executes a built-in command, or an external {@code mn-<name>} executable found on
+     * {@code PATH} when the first argument is not a built-in command.
+     *
+     * @param args        the arguments passed to {@code mn}
+     * @param environment the process environment used to locate external commands
+     * @return the exit code
+     */
+    static int execute(String[] args, Map<String, String> environment) {
         boolean noOpConsole = args.length > 0 && args[0].startsWith("update-cli-config");
         try (BeanContext beanContext = ApplicationContext.builder().deduceEnvironment(false).start()) {
-            return createCommandLine(beanContext, noOpConsole).execute(args);
+            CommandLine commandLine = createCommandLine(beanContext, noOpConsole, environment);
+            Optional<ExternalCommand> external = ExternalCommand.find(commandLine, args, environment);
+            if (external.isPresent()) {
+                return external.get().run();
+            }
+            return commandLine.execute(args);
         }
     }
 
     private static CommandLine createCommandLine(BeanContext beanContext, boolean noOpConsole) {
+        return createCommandLine(beanContext, noOpConsole, System.getenv());
+    }
+
+    private static CommandLine createCommandLine(BeanContext beanContext, boolean noOpConsole, Map<String, String> environment) {
         MicronautStarter starter = beanContext.getBean(MicronautStarter.class);
         CommandLine commandLine = new CommandLine(starter, new MicronautFactory(beanContext));
         commandLine.setExecutionExceptionHandler((ex, commandLine1, parseResult) -> EXCEPTION_HANDLER.apply(ex, commandLine1));
         commandLine.setUsageHelpWidth(100);
+        List<String> externalCommands = ExternalCommand.available(environment);
+        if (!externalCommands.isEmpty()) {
+            List<String> footer = new ArrayList<>();
+            footer.add("");
+            footer.add("@|bold,underline External commands:|@ (" + ExternalCommand.PREFIX + "<name> executables on PATH)");
+            externalCommands.forEach(name -> footer.add("  " + name));
+            commandLine.getCommandSpec().usageMessage().footer(footer.toArray(new String[0]));
+        }
 
         CodeGenConfig codeGenConfig = CodeGenConfig.load(beanContext, noOpConsole ? ConsoleOutput.NOOP : starter);
         if (codeGenConfig != null) {
