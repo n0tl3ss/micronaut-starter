@@ -85,6 +85,13 @@ jobs:
       - name: "✅ Verify Create App (CMD)"
         shell: cmd
         run: starter-cli\\build\\native\\nativeCompile\\mn create-app test2
+      - name: "📄 Upload JVM crash log"
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows-jvm-crash-log-${{ github.run_id }}
+          path: hs_err_pid*.log
+          if-no-files-found: ignore
       - name: "🤐 ZIP Archive"
         run: |
           New-Item "./mn-win-amd64-snapshot/bin" -ItemType Directory -ea 0
