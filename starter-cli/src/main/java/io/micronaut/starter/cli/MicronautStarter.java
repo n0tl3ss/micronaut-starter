@@ -126,7 +126,7 @@ public class MicronautStarter extends BaseCommand implements Callable<Integer> {
 
     /**
      * Executes a built-in command, or an external {@code mn-<name>} executable found on
-     * {@code PATH} when the first argument is not a built-in command.
+     * {@code PATH} when the first command name after root options is not built in.
      *
      * @param args        the arguments passed to {@code mn}
      * @param environment the process environment used to locate external commands
@@ -153,14 +153,6 @@ public class MicronautStarter extends BaseCommand implements Callable<Integer> {
         CommandLine commandLine = new CommandLine(starter, new MicronautFactory(beanContext));
         commandLine.setExecutionExceptionHandler((ex, commandLine1, parseResult) -> EXCEPTION_HANDLER.apply(ex, commandLine1));
         commandLine.setUsageHelpWidth(100);
-        List<String> externalCommands = ExternalCommand.available(environment);
-        if (!externalCommands.isEmpty()) {
-            List<String> footer = new ArrayList<>();
-            footer.add("");
-            footer.add("@|bold,underline External commands:|@ (" + ExternalCommand.PREFIX + "<name> executables on PATH)");
-            externalCommands.forEach(name -> footer.add("  " + name));
-            commandLine.getCommandSpec().usageMessage().footer(footer.toArray(new String[0]));
-        }
 
         CodeGenConfig codeGenConfig = CodeGenConfig.load(beanContext, noOpConsole ? ConsoleOutput.NOOP : starter);
         if (codeGenConfig != null) {
@@ -169,6 +161,17 @@ public class MicronautStarter extends BaseCommand implements Callable<Integer> {
                     .map(bt -> beanContext.createBean(bt, codeGenConfig))
                     .filter(CodeGenCommand::applies)
                     .forEach(commandLine::addSubcommand);
+        }
+
+        List<String> externalCommands = ExternalCommand.available(environment).stream()
+                .filter(name -> !commandLine.getSubcommands().containsKey(name))
+                .toList();
+        if (!externalCommands.isEmpty()) {
+            List<String> footer = new ArrayList<>();
+            footer.add("");
+            footer.add("@|bold,underline External commands:|@ (" + ExternalCommand.PREFIX + "<name> executables on PATH)");
+            externalCommands.forEach(name -> footer.add("  " + name));
+            commandLine.getCommandSpec().usageMessage().footer(footer.toArray(new String[0]));
         }
 
         return commandLine;

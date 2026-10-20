@@ -4,11 +4,14 @@ import picocli.CommandLine
 import spock.lang.Requires
 import spock.lang.Specification
 import spock.lang.TempDir
+import spock.util.concurrent.PollingConditions
 import spock.util.environment.OperatingSystem
 
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.attribute.PosixFilePermissions
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 
 class ExternalCommandSpec extends Specification {
 
@@ -23,6 +26,15 @@ class ExternalCommandSpec extends Specification {
 
         expect:
         ExternalCommand.find(root, ["create-app", "demo"] as String[], environment()).isEmpty()
+    }
+
+    void "a registered built-in alias is never dispatched to an external executable"() {
+        given:
+        root.addSubcommand("ca", root.getSubcommands().get("create-app"))
+        executable("mn-ca")
+
+        expect:
+        ExternalCommand.find(root, ["ca", "demo"] as String[], environment()).isEmpty()
     }
 
     void "names that are not plain lower-case words are never looked up"() {
@@ -56,6 +68,34 @@ class ExternalCommandSpec extends Specification {
         command.get().arguments == ["--flag", "value"]
     }
 
+    void "root options and the option separator can precede an external command"() {
+        given:
+        executable("mn-hello")
+
+        expect:
+        ExternalCommand.find(root, ["--verbose", "hello", "one"] as String[], environment()).get().arguments == ["one"]
+        ExternalCommand.find(root, ["--", "hello", "two"] as String[], environment()).get().arguments == ["two"]
+    }
+
+    void "boolean root options accept attached values before an external command"() {
+        given:
+        executable("mn-hello")
+
+        expect:
+        ExternalCommand.find(root, ["--verbose=false", "hello"] as String[], environment()).present
+        ExternalCommand.find(root, ["--verbose=bogus", "hello"] as String[], environment()).isEmpty()
+    }
+
+    void "help and version retain precedence over external commands"() {
+        given:
+        executable("mn-help")
+        executable("mn-version")
+
+        expect:
+        ExternalCommand.find(root, ["--help", "hello"] as String[], environment()).isEmpty()
+        ExternalCommand.find(root, ["--version", "hello"] as String[], environment()).isEmpty()
+    }
+
     void "empty PATH entries and non-executable files are ignored"() {
         given:
         Path plain = bin.resolve("mn-plain")
@@ -70,6 +110,16 @@ class ExternalCommandSpec extends Specification {
         ExternalCommand.locate("hello", [PATH: File.pathSeparator + File.pathSeparator]).isEmpty()
     }
 
+    @Requires({ !OperatingSystem.current.windows })
+    void "relative PATH entries are resolved from the working directory"() {
+        given:
+        executable("mn-relative")
+        Path relativeBin = Path.of("").toAbsolutePath().relativize(bin.toAbsolutePath())
+
+        expect:
+        ExternalCommand.locate("relative", [PATH: relativeBin.toString()]).present
+    }
+
     void "help lists the external commands found on PATH"() {
         given:
         executable("mn-hello")
@@ -79,6 +129,15 @@ class ExternalCommandSpec extends Specification {
         expect:
         ExternalCommand.available(environment()) == ["hello", "migrations"]
         ExternalCommand.available([PATH: bin.resolve("missing").toString()]).isEmpty()
+    }
+
+    @Requires({ OperatingSystem.current.windows })
+    void "help ignores files with a PATHEXT suffix that do not have the mn prefix"() {
+        given:
+        executable("otherhello")
+
+        expect:
+        ExternalCommand.available(environment()).isEmpty()
     }
 
     @Requires({ !OperatingSystem.current.windows })
@@ -93,6 +152,77 @@ class ExternalCommandSpec extends Specification {
         then:
         exitCode == 3
         Files.readString(marker) == "one|--two|three four|"
+    }
+
+    @Requires({ !OperatingSystem.current.windows })
+    void "interrupting an external command destroys its child and restores the interrupt"() {
+        given:
+        Path pidFile = bin.resolve("child.pid")
+        script("mn-sleep", "#!/bin/sh\nprintf '%s' \"\$\$\" > \"${pidFile}\"\nexec sleep 30\n")
+        ExternalCommand command = ExternalCommand.find(root, ["sleep"] as String[], environment()).get()
+        AtomicInteger exitCode = new AtomicInteger()
+        AtomicBoolean interrupted = new AtomicBoolean()
+        Thread worker = Thread.start {
+            exitCode.set(command.run())
+            interrupted.set(Thread.currentThread().isInterrupted())
+        }
+        long childPid = -1
+        new PollingConditions(timeout: 10, initialDelay: 0.1, delay: 0.1).eventually {
+            assert Files.exists(pidFile)
+        }
+        childPid = Long.parseLong(Files.readString(pidFile))
+
+        when:
+        worker.interrupt()
+        worker.join(5000)
+
+        then:
+        !worker.isAlive()
+        exitCode.get() == ExternalCommand.CANNOT_RUN
+        interrupted.get()
+        new PollingConditions(timeout: 5, initialDelay: 0.1, delay: 0.1).eventually {
+            assert !ProcessHandle.of(childPid).map { handle -> handle.isAlive() }.orElse(false)
+        }
+
+        cleanup:
+        if (worker.isAlive()) {
+            worker.interrupt()
+            worker.join(5000)
+        }
+        if (childPid > 0) {
+            ProcessHandle.of(childPid).ifPresent { handle -> handle.destroyForcibly() }
+        }
+    }
+
+    @Requires({ OperatingSystem.current.windows })
+    void "mn runs a Windows batch external command with quoted arguments"() {
+        given:
+        Path marker = bin.resolve("marker.txt")
+        script("mn-hello.cmd", "@echo off\r\n>\"${marker}\" echo arg1=%~1 arg2=%~2\r\nexit /b 7\r\n")
+
+        when:
+        int exitCode = MicronautStarter.execute(["hello", "three four", ""] as String[], environment())
+
+        then:
+        exitCode == 7
+        Files.readString(marker).trim() == "arg1=three four arg2="
+    }
+
+    @Requires({ OperatingSystem.current.windows })
+    void "mn refuses shell metacharacters for a Windows batch external command"() {
+        given:
+        Path marker = bin.resolve("marker.txt")
+        script("mn-hello.cmd", "@echo off\r\n>\"${marker}\" echo invoked\r\nexit /b 7\r\n")
+
+        when:
+        int exitCode = MicronautStarter.execute(["hello", argument] as String[], environment())
+
+        then:
+        exitCode == ExternalCommand.CANNOT_RUN
+        !Files.exists(marker)
+
+        where:
+        argument << ["a&echo INJECTED", "%PATH%", "a|echo INJECTED", "a^b", "a\"b"]
     }
 
     @Requires({ !OperatingSystem.current.windows })
