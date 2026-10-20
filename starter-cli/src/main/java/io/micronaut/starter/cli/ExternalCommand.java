@@ -16,8 +16,9 @@
 package io.micronaut.starter.cli;
 
 import io.micronaut.core.annotation.Internal;
-import io.micronaut.core.annotation.NonNull;
+import org.jspecify.annotations.NonNull;
 import picocli.CommandLine;
+import picocli.CommandLine.Model.OptionSpec;
 
 import java.io.File;
 import java.io.IOException;
@@ -38,16 +39,18 @@ import java.util.regex.Pattern;
  * {@code <name>} command, following the {@code git-<name>} and {@code kubectl-<name>}
  * convention.
  *
- * <p>The lookup only runs when the first argument is neither an option nor a built-in
- * command, that is, when Picocli would reject it anyway; built-in commands therefore
- * always win. The name must match {@code [a-z][a-z0-9-]*}, so path separators, dots and
- * upper-case names are never looked up. Only the directories listed in {@code PATH} are
- * searched; empty entries (the current directory on some shells) are skipped. On Windows
- * the extensions in {@code PATHEXT} are tried in order.</p>
+ * <p>The lookup runs after root options when the first command name is neither a built-in
+ * command nor a valid Picocli command, that is, when Picocli would reject it anyway;
+ * built-in commands therefore always win. The name must match {@code [a-z][a-z0-9-]*},
+ * so path separators, dots and upper-case names are never looked up. Only the directories
+ * listed in {@code PATH} are searched; empty entries (the current directory on some
+ * shells) are skipped. On Windows the extensions in {@code PATHEXT} are tried in order.</p>
  *
  * <p>The external command inherits the standard streams and its exit code becomes the
  * exit code of {@code mn}. Only {@link ProcessBuilder} is used, so the lookup works in the
- * native {@code mn} image without further configuration.</p>
+ * native {@code mn} image without further configuration. On Windows, batch files run
+ * through the command processor; arguments containing command-shell metacharacters are
+ * rejected to keep the command literal.</p>
  *
  * @since 5.2.3
  */
@@ -105,15 +108,71 @@ final class ExternalCommand {
      */
     @NonNull
     static Optional<ExternalCommand> find(@NonNull CommandLine root, @NonNull String[] args, @NonNull Map<String, String> environment) {
-        if (args.length == 0) {
+        int commandIndex = commandIndex(root, args);
+        if (commandIndex < 0) {
             return Optional.empty();
         }
-        String candidate = args[0];
+        String candidate = args[commandIndex];
         if (!NAME.matcher(candidate).matches() || root.getSubcommands().containsKey(candidate)) {
             return Optional.empty();
         }
         return locate(candidate, environment)
-                .map(executable -> new ExternalCommand(candidate, executable, Arrays.asList(args).subList(1, args.length)));
+                .map(executable -> new ExternalCommand(candidate, executable,
+                        Arrays.asList(args).subList(commandIndex + 1, args.length)));
+    }
+
+    /**
+     * Finds the first token that can be a subcommand after parsing root options.
+     * Picocli's help and version options must retain their usual precedence, while
+     * boolean root options such as {@code --verbose} may precede an external command.
+     */
+    private static int commandIndex(@NonNull CommandLine root, @NonNull String[] args) {
+        for (int i = 0; i < args.length; i++) {
+            String argument = args[i];
+            if ("--".equals(argument)) {
+                return i + 1 < args.length ? i + 1 : -1;
+            }
+            if (!argument.startsWith("-")) {
+                return i;
+            }
+
+            String optionName = argument;
+            int valueSeparator = argument.indexOf('=');
+            if (valueSeparator > 0) {
+                optionName = argument.substring(0, valueSeparator);
+            }
+            OptionSpec option = root.getCommandSpec().findOption(optionName);
+            if (option == null || option.usageHelp() || option.versionHelp()) {
+                return -1;
+            }
+            if (valueSeparator > 0) {
+                // Boolean flags accept an attached true/false value. Let Picocli
+                // produce its normal usage error for every other attached value.
+                if (option.arity().max() == 0) {
+                    String value = argument.substring(valueSeparator + 1);
+                    if (!isBooleanOption(option) || !isBooleanValue(value)) {
+                        return -1;
+                    }
+                }
+                continue;
+            }
+            int optionValues = option.arity().max();
+            if (optionValues > 0) {
+                if (i + optionValues >= args.length) {
+                    return -1;
+                }
+                i += optionValues;
+            }
+        }
+        return -1;
+    }
+
+    private static boolean isBooleanOption(OptionSpec option) {
+        return option.type() == boolean.class || option.type() == Boolean.class;
+    }
+
+    private static boolean isBooleanValue(String value) {
+        return "true".equalsIgnoreCase(value) || "false".equalsIgnoreCase(value);
     }
 
     /**
@@ -131,8 +190,12 @@ final class ExternalCommand {
         for (Path directory : searchPath(environment)) {
             for (String extension : extensions(environment)) {
                 Path candidate = directory.resolve(PREFIX + name + extension);
-                if (Files.isRegularFile(candidate) && Files.isExecutable(candidate)) {
-                    return Optional.of(candidate);
+                try {
+                    if (Files.isRegularFile(candidate) && Files.isExecutable(candidate)) {
+                        return Optional.of(candidate);
+                    }
+                } catch (SecurityException ignored) {
+                    // An inaccessible PATH entry behaves like a missing executable.
                 }
             }
         }
@@ -150,12 +213,18 @@ final class ExternalCommand {
         TreeSet<String> names = new TreeSet<>();
         List<String> extensions = extensions(environment);
         for (Path directory : searchPath(environment)) {
-            if (!Files.isDirectory(directory)) {
-                continue;
-            }
-            try (DirectoryStream<Path> entries = Files.newDirectoryStream(directory, PREFIX + "*")) {
-                for (Path entry : entries) {
-                    externalName(entry, extensions).ifPresent(names::add);
+            try {
+                if (!Files.isDirectory(directory)) {
+                    continue;
+                }
+                try (DirectoryStream<Path> entries = Files.newDirectoryStream(directory, PREFIX + "*")) {
+                    for (Path entry : entries) {
+                        try {
+                            externalName(entry, extensions).ifPresent(names::add);
+                        } catch (RuntimeException ignored) {
+                            // An inaccessible entry does not hide other commands in this directory.
+                        }
+                    }
                 }
             } catch (IOException | RuntimeException ignored) {
                 // An unreadable PATH entry does not affect help output.
@@ -170,19 +239,78 @@ final class ExternalCommand {
      * @return the command's exit code, or {@value #CANNOT_RUN} when it cannot be started
      */
     int run() {
-        List<String> commandLine = new ArrayList<>(arguments.size() + 1);
-        commandLine.add(executable.toString());
-        commandLine.addAll(arguments);
+        if (isWindowsBatchFile(executable)
+                && (containsBatchShellCharacters(executable.toString())
+                || arguments.stream().anyMatch(ExternalCommand::containsBatchShellCharacters))) {
+            System.err.println("mn: cannot pass command-shell metacharacters to batch external command " + executable);
+            return CANNOT_RUN;
+        }
+        List<String> commandLine = processCommand();
+        Process process = null;
         try {
-            return new ProcessBuilder(commandLine).inheritIO().start().waitFor();
+            process = new ProcessBuilder(commandLine).inheritIO().start();
+            return process.waitFor();
         } catch (IOException e) {
             System.err.println("mn: cannot run " + executable + ": " + e.getMessage());
             return CANNOT_RUN;
+        } catch (SecurityException e) {
+            System.err.println("mn: cannot run " + executable + ": " + e.getMessage());
+            return CANNOT_RUN;
         } catch (InterruptedException e) {
+            if (process != null) {
+                process.destroyForcibly();
+            }
             Thread.currentThread().interrupt();
             System.err.println("mn: interrupted while running " + executable);
             return CANNOT_RUN;
         }
+    }
+
+    private List<String> processCommand() {
+        if (isWindowsBatchFile(executable)) {
+            // CreateProcess cannot execute a .cmd/.bat file directly. The command
+            // is started by a fresh command processor, so its exit code is retained.
+            List<String> commandLine = new ArrayList<>(arguments.size() + 4);
+            commandLine.add(commandProcessor());
+            commandLine.add("/d");
+            commandLine.add("/c");
+            commandLine.add(executable.toString());
+            commandLine.addAll(arguments);
+            return commandLine;
+        }
+        List<String> commandLine = new ArrayList<>(arguments.size() + 1);
+        commandLine.add(executable.toString());
+        commandLine.addAll(arguments);
+        return commandLine;
+    }
+
+    private static String commandProcessor() {
+        String commandProcessor = System.getenv("ComSpec");
+        if (commandProcessor == null || commandProcessor.isBlank()) {
+            commandProcessor = System.getenv("COMSPEC");
+        }
+        return commandProcessor == null || commandProcessor.isBlank() ? "cmd.exe" : commandProcessor;
+    }
+
+    private static boolean isWindowsBatchFile(Path path) {
+        if (File.separatorChar != '\\') {
+            return false;
+        }
+        String fileName = path.getFileName().toString().toLowerCase(Locale.ROOT);
+        return fileName.endsWith(".cmd") || fileName.endsWith(".bat");
+    }
+
+    private static boolean containsBatchShellCharacters(String value) {
+        for (int i = 0; i < value.length(); i++) {
+            char character = value.charAt(i);
+            if (character < 0x20 || switch (character) {
+                case '"', '%', '&', '(', ')', '<', '>', '^', '|', '!' -> true;
+                default -> false;
+            }) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private static Optional<String> externalName(Path entry, List<String> extensions) {
@@ -190,8 +318,14 @@ final class ExternalCommand {
             return Optional.empty();
         }
         String fileName = entry.getFileName().toString();
+        boolean prefixMatches = File.separatorChar == '\\'
+                ? fileName.regionMatches(true, 0, PREFIX, 0, PREFIX.length())
+                : fileName.startsWith(PREFIX);
+        if (!prefixMatches) {
+            return Optional.empty();
+        }
         for (String extension : extensions) {
-            if (extension.isEmpty() ? fileName.startsWith(PREFIX)
+            if (extension.isEmpty() ? prefixMatches
                     : fileName.toLowerCase(Locale.ROOT).endsWith(extension) && fileName.length() > extension.length()) {
                 String name = fileName.substring(PREFIX.length(), fileName.length() - extension.length());
                 if (NAME.matcher(name).matches()) {
@@ -204,7 +338,13 @@ final class ExternalCommand {
 
     private static List<Path> searchPath(Map<String, String> environment) {
         List<Path> directories = new ArrayList<>();
-        String path = environment.getOrDefault("PATH", environment.getOrDefault("Path", ""));
+        String path = environment.get("PATH");
+        if (path == null) {
+            path = environment.get("Path");
+        }
+        if (path == null) {
+            path = "";
+        }
         for (String entry : path.split(Pattern.quote(File.pathSeparator))) {
             if (entry.isEmpty()) {
                 continue;

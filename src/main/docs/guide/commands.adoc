@@ -22,7 +22,7 @@ include::{includedir}/mn-create-messaging-app.adoc[]
 
 == External commands
 
-`mn` can be extended without rebuilding it. When the first argument is not an option and not one of the commands above, `mn` looks for an executable named `mn-<name>` on `PATH` and runs it with the remaining arguments, following the `git-<name>` and `kubectl-<name>` convention. The external command inherits the standard streams and its exit code becomes the exit code of `mn`.
+`mn` can be extended without rebuilding it. After any root options, when the first command name is not one of the commands above, `mn` looks for an executable named `mn-<name>` on `PATH` and runs it with the remaining arguments, following the `git-<name>` and `kubectl-<name>` convention. The external command inherits the standard streams and its exit code becomes the exit code of `mn`.
 
 [source,bash]
 ----
@@ -33,4 +33,4 @@ $ mn hello world
 hello world
 ----
 
-Built-in commands always win: the lookup only runs for a name `mn` would otherwise reject. The name must match `[a-z][a-z0-9-]*`, only the directories listed in `PATH` are searched (empty entries are skipped), and on Windows the extensions in `PATHEXT` are tried in order. `mn --help` lists the external commands it finds under *External commands*.
+Built-in commands always win: the lookup only runs for a name `mn` would otherwise reject. The name must match `[a-z][a-z0-9-]*`, only the directories listed in `PATH` are searched (empty entries are skipped), and on Windows the extensions in `PATHEXT` are tried in order. Windows batch commands reject arguments containing command-shell metacharacters. `mn --help` lists the external commands it finds under *External commands*.
