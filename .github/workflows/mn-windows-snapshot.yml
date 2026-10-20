@@ -35,8 +35,9 @@ jobs:
       - name: "✅ Verify Create App (Powershell)"
         run: ./starter-cli/build/native/nativeCompile/mn.exe create-app test
       - name: "✅ Verify External Command (Powershell)"
-        shell: powershell
+        shell: pwsh
         run: |
+          $PSNativeCommandArgumentPassing = 'Standard'
           $external = Join-Path $env:RUNNER_TEMP "mn external space"
           New-Item -ItemType Directory -Path $external -Force | Out-Null
           $script = Join-Path $external "mn-hello.cmd"
