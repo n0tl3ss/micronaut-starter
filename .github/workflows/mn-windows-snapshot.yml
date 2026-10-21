@@ -38,7 +38,7 @@ jobs:
         shell: pwsh
         run: |
           $PSNativeCommandArgumentPassing = 'Standard'
-          $external = Join-Path $env:RUNNER_TEMP "mn external space"
+          $external = Join-Path $env:RUNNER_TEMP "mn external (x86)"
           New-Item -ItemType Directory -Path $external -Force | Out-Null
           $script = Join-Path $external "mn-hello.cmd"
           $marker = Join-Path $external "invoked.marker"
@@ -64,14 +64,19 @@ jobs:
           $edgeArgs = (Get-Content -Raw $edgeMarker).Trim()
           if ($edgeArgs -ne "arg1=three four arg2=[] arg3=[tail\]") { throw "Unexpected edge-case arguments: $edgeArgs" }
 
+          # An .exe command is started directly, so its exit code and arguments are not subject to the batch restrictions.
+          Copy-Item -Path $env:ComSpec -Destination (Join-Path $external "mn-shell.exe")
+          $output = & $mn "shell" "/c" "exit 5" 2>&1 | Out-String
+          if ($LASTEXITCODE -ne 5) { throw "External exe command returned $LASTEXITCODE instead of 5" }
+
           Remove-Item $marker -Force -ErrorAction SilentlyContinue
           $previousErrorActionPreference = $ErrorActionPreference
           $ErrorActionPreference = "Continue"
           try {
-            foreach ($dangerous in @("a&echo INJECTED", "%PATH%")) {
+            foreach ($dangerous in @("a&echo INJECTED", "%PATH%", "a(b")) {
               $output = & $mn "hello" $dangerous 2>&1 | Out-String
               if ($LASTEXITCODE -ne 127) { throw "Dangerous external argument returned $LASTEXITCODE instead of 127" }
-              if ($output -notmatch "command-shell metacharacters") { throw "Missing dangerous-argument diagnostic: $output" }
+              if ($output -notmatch "argument 1 contains the command-shell metacharacter") { throw "Missing dangerous-argument diagnostic: $output" }
               if (Test-Path $marker) { throw "Batch command executed for dangerous argument: $dangerous" }
             }
           } finally {
@@ -85,13 +90,6 @@ jobs:
       - name: "✅ Verify Create App (CMD)"
         shell: cmd
         run: starter-cli\\build\\native\\nativeCompile\\mn create-app test2
-      - name: "📄 Upload JVM crash log"
-        if: failure()
-        uses: actions/upload-artifact@v7
-        with:
-          name: windows-jvm-crash-log-${{ github.run_id }}
-          path: hs_err_pid*.log
-          if-no-files-found: ignore
       - name: "🤐 ZIP Archive"
         run: |
           New-Item "./mn-win-amd64-snapshot/bin" -ItemType Directory -ea 0

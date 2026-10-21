@@ -41,9 +41,10 @@ import io.micronaut.starter.cli.feature.acme.AcmeServerOption;
 import io.micronaut.starter.io.ConsoleOutput;
 import picocli.CommandLine;
 import picocli.CommandLine.Command;
+import picocli.CommandLine.Help;
+import picocli.CommandLine.Model.UsageMessageSpec;
 import picocli.CommandLine.ParameterException;
 
-import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -114,9 +115,19 @@ public class MicronautStarter extends BaseCommand implements Callable<Integer> {
     }
 
     static CommandLine createCommandLine() {
+        return createCommandLine(System.getenv());
+    }
+
+    /**
+     * Creates the {@code mn} command line.
+     *
+     * @param environment the process environment used to list external commands in the help
+     * @return the command line
+     */
+    static CommandLine createCommandLine(Map<String, String> environment) {
         boolean noOpConsole = MicronautStarter.interactiveShell;
         try (BeanContext beanContext = ApplicationContext.builder().deduceEnvironment(false).start()) {
-            return createCommandLine(beanContext, noOpConsole);
+            return createCommandLine(beanContext, noOpConsole, environment);
         }
     }
 
@@ -134,18 +145,16 @@ public class MicronautStarter extends BaseCommand implements Callable<Integer> {
      */
     static int execute(String[] args, Map<String, String> environment) {
         boolean noOpConsole = args.length > 0 && args[0].startsWith("update-cli-config");
+        Optional<ExternalCommand> external;
         try (BeanContext beanContext = ApplicationContext.builder().deduceEnvironment(false).start()) {
             CommandLine commandLine = createCommandLine(beanContext, noOpConsole, environment);
-            Optional<ExternalCommand> external = ExternalCommand.find(commandLine, args, environment);
-            if (external.isPresent()) {
-                return external.get().run();
+            external = ExternalCommand.find(commandLine, args, environment);
+            if (external.isEmpty()) {
+                return commandLine.execute(args);
             }
-            return commandLine.execute(args);
         }
-    }
-
-    private static CommandLine createCommandLine(BeanContext beanContext, boolean noOpConsole) {
-        return createCommandLine(beanContext, noOpConsole, System.getenv());
+        // The bean context is closed before the external command starts.
+        return external.get().run();
     }
 
     private static CommandLine createCommandLine(BeanContext beanContext, boolean noOpConsole, Map<String, String> environment) {
@@ -163,18 +172,23 @@ public class MicronautStarter extends BaseCommand implements Callable<Integer> {
                     .forEach(commandLine::addSubcommand);
         }
 
-        List<String> externalCommands = ExternalCommand.available(environment).stream()
-                .filter(name -> !commandLine.getSubcommands().containsKey(name))
-                .toList();
-        if (!externalCommands.isEmpty()) {
-            List<String> footer = new ArrayList<>();
-            footer.add("");
-            footer.add("@|bold,underline External commands:|@ (" + ExternalCommand.PREFIX + "<name> executables on PATH)");
-            externalCommands.forEach(name -> footer.add("  " + name));
-            commandLine.getCommandSpec().usageMessage().footer(footer.toArray(new String[0]));
-        }
+        // PATH is only scanned when the help of mn itself is rendered.
+        commandLine.getHelpSectionMap().put(UsageMessageSpec.SECTION_KEY_FOOTER, help -> externalCommandsFooter(help, environment));
 
         return commandLine;
+    }
+
+    private static String externalCommandsFooter(Help help, Map<String, String> environment) {
+        List<String> externalCommands = ExternalCommand.available(environment).stream()
+                .filter(name -> !help.commandSpec().subcommands().containsKey(name))
+                .toList();
+        if (externalCommands.isEmpty()) {
+            return "";
+        }
+        StringBuilder footer = new StringBuilder("%n@|bold,underline External commands:|@ (")
+                .append(ExternalCommand.PREFIX).append("<name> executables on PATH)%n");
+        externalCommands.forEach(name -> footer.append("  ").append(name).append("%n"));
+        return help.ansi().text(String.format(footer.toString())).toString();
     }
 
     @Override
