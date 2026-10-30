@@ -57,7 +57,7 @@ import java.util.regex.Pattern;
  * could not be passed literally (see {@link #batchRefusal}). Other executables are
  * started directly.</p>
  *
- * @since 5.2.4
+ * @since 5.2.5
  */
 @Internal
 final class ExternalCommand {
