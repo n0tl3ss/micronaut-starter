@@ -205,12 +205,12 @@ class ExternalCommandSpec extends Specification {
     void "help lists the external commands found on PATH"() {
         given:
         executable("mn-hello")
-        executable("mn-migrations")
+        executable("mn-world")
         executable("mn-Upper")
         executable("mn-Not.Valid")
 
         expect:
-        ExternalCommand.available(environment()) == ["hello", "migrations"]
+        ExternalCommand.available(environment()) == ["hello", "world"]
         ExternalCommand.available([PATH: bin.resolve("missing").toString()]).isEmpty()
     }
 
