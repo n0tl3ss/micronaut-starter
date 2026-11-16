@@ -23,6 +23,10 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
       - name: "🧪 Verify JVM External Command"
         run: ./gradlew micronaut-cli:test --tests io.micronaut.starter.cli.ExternalCommandSpec --no-daemon
+      - name: "🩺 JVM crash log"
+        if: failure()
+        shell: pwsh
+        run: Get-ChildItem -Filter 'hs_err_pid*.log' | ForEach-Object { Get-Content $_.FullName -TotalCount 160 }
       - name: "📸 Build the Native Image"
         run: ./gradlew micronaut-cli:nativeCompile --no-daemon
         env:
